@@ -158,7 +158,7 @@ function settingRow(e: SettingEntry): string {
     } else if (e.type === 'checkbox') {
         control = `<label class="toggle"><input type="checkbox" data-setting-key="${e.key}" disabled><span class="toggle-track"></span></label>`;
     }
-    return `<div class="setting-row"><span class="setting-label">${e.label}</span><input type="checkbox" class="enable-check" data-setting-enable="${e.key}"><div class="setting-control">${control}</div></div>`;
+    return `<div class="setting-row"><span class="setting-label">${e.label}</span><input type="checkbox" class="enable-check" data-setting-enable="${e.key}"><div class="setting-control">${control}</div><button class="color-reset-btn" data-setting-reset="${e.key}" title="Clear override">↺</button></div>`;
 }
 
 function section(title: string, rows: string): string {
@@ -201,13 +201,19 @@ export class ThemeCustomizerPanel {
 
     private _sendSettings(
         colorCustomizations?: Record<string, string>,
-        tokenColorCustomizations?: Record<string, any>
+        tokenColorCustomizations?: Record<string, any>,
+        settingOverridesOverride?: Record<string, any>
     ) {
         const cfg = vscode.workspace.getConfiguration();
-        const settingOverrides: Record<string, any> = {};
-        for (const e of [...FONT_SETTINGS, ...EDITOR_SETTINGS]) {
-            const v = cfg.inspect(e.key)?.globalValue;
-            if (v !== undefined) { settingOverrides[e.key] = v; }
+        let settingOverrides: Record<string, any>;
+        if (settingOverridesOverride !== undefined) {
+            settingOverrides = settingOverridesOverride;
+        } else {
+            settingOverrides = {};
+            for (const e of [...FONT_SETTINGS, ...EDITOR_SETTINGS]) {
+                const v = cfg.inspect(e.key)?.globalValue;
+                if (v !== undefined) { settingOverrides[e.key] = v; }
+            }
         }
         this._panel.webview.postMessage({
             command: 'loadSettings',
@@ -326,6 +332,20 @@ export class ThemeCustomizerPanel {
                 await cfg.update('workbench.colorCustomizations', colorOverrides, G);
                 await cfg.update('editor.tokenColorCustomizations', {}, G);
                 this._sendSettings(colorOverrides, {});
+                break;
+            }
+
+            case 'resetSyntaxFont': {
+                const answer = await vscode.window.showWarningMessage(
+                    'Reset all syntax, font and editor overrides to defaults?',
+                    { modal: true }, 'Reset'
+                );
+                if (answer !== 'Reset') break;
+                await cfg.update('editor.tokenColorCustomizations', {}, G);
+                for (const e of [...FONT_SETTINGS, ...EDITOR_SETTINGS]) {
+                    await cfg.update(e.key, undefined, G);
+                }
+                this._sendSettings(undefined, {}, {});
                 break;
             }
 
@@ -586,6 +606,7 @@ button.btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackgrou
   <button class="btn btn-secondary" id="btn-export">Export Theme</button>
   <button class="btn btn-secondary" id="btn-settings">Open settings.json</button>
   <button class="btn btn-secondary" id="btn-reset">Reset Colors</button>
+  <button class="btn btn-secondary" id="btn-reset-syntax">Reset Syntax &amp; Font</button>
 </footer>
 
 <script>
@@ -886,6 +907,9 @@ document.getElementById('btn-import').addEventListener('click', () => {
 document.getElementById('btn-reset').addEventListener('click', () => {
   vscode.postMessage({ command: 'resetAll' });
 });
+document.getElementById('btn-reset-syntax').addEventListener('click', () => {
+  vscode.postMessage({ command: 'resetSyntaxFont' });
+});
 
 // ── Individual color row reset buttons (delegated) ──
 document.addEventListener('click', e => {
@@ -901,6 +925,17 @@ document.addEventListener('click', e => {
   }
   // For resetColor, extension calls _sendSettings() and loadSettings syncs the DOM
   vscode.postMessage({ command: cmd, key });
+});
+
+// ── Setting row reset buttons (delegated) ──
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.color-reset-btn[data-setting-reset]');
+  if (!btn) return;
+  const key = btn.dataset.settingReset;
+  const cb = document.querySelector('.enable-check[data-setting-enable="' + key + '"]');
+  if (cb) { cb.checked = false; }
+  document.querySelectorAll('[data-setting-key="' + key + '"]').forEach(el => { el.disabled = true; });
+  vscode.postMessage({ command: 'clearSetting', key });
 });
 
 // ── Smart reset buttons (restore theme colors for the group) ──

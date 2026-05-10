@@ -13,6 +13,11 @@
         "command": "themeCustomizer.open",
         "title": "Open Theme Customizer",
         "category": "Theme"
+      },
+      {
+        "command": "themeCustomizer.clearState",
+        "title": "Clear Stored State",
+        "category": "Theme"
       }
     ],
     "keybindings": [
