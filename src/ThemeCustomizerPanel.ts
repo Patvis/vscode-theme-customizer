@@ -72,6 +72,11 @@ const PANEL_COLORS: ColorEntry[] = [
     { label: 'Terminal Selection',     key: 'terminal.selectionBackground',          default: '#ffffff40' },
 ];
 
+const MANAGED_COLOR_DEFAULTS: Record<string, string> = Object.fromEntries([
+    ...EDITOR_COLORS, ...SIDEBAR_COLORS, ...ACTIVITY_BAR_COLORS,
+    ...STATUS_BAR_COLORS, ...TITLE_BAR_COLORS, ...TAB_COLORS, ...PANEL_COLORS,
+].map(e => [e.key, e.default]));
+
 const SYNTAX_TOKENS: ColorEntry[] = [
     { label: 'Comments',               key: 'comments',   default: '#6a9955' },
     { label: 'Strings',                key: 'strings',    default: '#ce9178' },
@@ -126,6 +131,7 @@ const EDITOR_SETTINGS: SettingEntry[] = [
 
 function colorRow(e: ColorEntry, isToken = false): string {
     const attr = isToken ? 'data-token-key' : 'data-color-key';
+    const cmd  = isToken ? 'clearTokenColor' : 'resetColor';
     return `<div class="color-row">
       <div class="color-meta">
         <span class="color-label">${e.label}</span>
@@ -135,6 +141,7 @@ function colorRow(e: ColorEntry, isToken = false): string {
         <input type="checkbox" class="enable-check" ${attr}="${e.key}" title="Enable customization">
         <input type="color" ${attr}="${e.key}" value="${e.default}" disabled title="${e.key}">
         <input type="text" class="hex-input" ${attr}="${e.key}" value="${e.default}" maxlength="7" disabled>
+        <button class="color-reset-btn" data-attr="${attr}" data-key="${e.key}" data-cmd="${cmd}" title="Clear override">↺</button>
       </div>
     </div>`;
 }
@@ -192,7 +199,10 @@ export class ThemeCustomizerPanel {
         this._panel.webview.onDidReceiveMessage(msg => this._handleMessage(msg), null, this._disposables);
     }
 
-    private _sendSettings() {
+    private _sendSettings(
+        colorCustomizations?: Record<string, string>,
+        tokenColorCustomizations?: Record<string, any>
+    ) {
         const cfg = vscode.workspace.getConfiguration();
         const settingOverrides: Record<string, any> = {};
         for (const e of [...FONT_SETTINGS, ...EDITOR_SETTINGS]) {
@@ -203,8 +213,8 @@ export class ThemeCustomizerPanel {
             command: 'loadSettings',
             settings: {
                 enabled:                  this._context.globalState.get<boolean>('themeCustomizerEnabled', true),
-                colorCustomizations:      cfg.get('workbench.colorCustomizations', {}),
-                tokenColorCustomizations: cfg.get('editor.tokenColorCustomizations', {}),
+                colorCustomizations:      colorCustomizations      ?? cfg.get<Record<string, string>>('workbench.colorCustomizations', {}),
+                tokenColorCustomizations: tokenColorCustomizations ?? cfg.get<Record<string, any>>('editor.tokenColorCustomizations', {}),
                 settingOverrides,
                 fontFamily:    cfg.get('editor.fontFamily', ''),
                 fontSize:      cfg.get('editor.fontSize', 14),
@@ -275,12 +285,49 @@ export class ThemeCustomizerPanel {
                 await cfg.update(msg.key, undefined, G);
                 break;
 
-            case 'resetAll':
-                await cfg.update('workbench.colorCustomizations', {}, G);
-                await cfg.update('editor.tokenColorCustomizations', {}, G);
-                this._sendSettings();
-                vscode.window.showInformationMessage('Theme Customizer: all color customizations cleared.');
+            case 'resetColor': {
+                const themeColors = await this._loadThemeColors();
+                const cur = { ...cfg.get<Record<string, string>>('workbench.colorCustomizations', {}) };
+                const color = themeColors[msg.key] ?? MANAGED_COLOR_DEFAULTS[msg.key];
+                if (color) { cur[msg.key] = color; } else { delete cur[msg.key]; }
+                await cfg.update('workbench.colorCustomizations', cur, G);
+                this._sendSettings(cur);
                 break;
+            }
+
+            case 'resetColors': {
+                const themeColors = await this._loadThemeColors();
+                const cur = { ...cfg.get<Record<string, string>>('workbench.colorCustomizations', {}) };
+                for (const key of (msg.keys as string[])) {
+                    const color = themeColors[key] ?? MANAGED_COLOR_DEFAULTS[key];
+                    if (color) { cur[key] = color; } else { delete cur[key]; }
+                }
+                await cfg.update('workbench.colorCustomizations', cur, G);
+                this._sendSettings(cur);
+                break;
+            }
+
+            case 'resetAll': {
+                const answer = await vscode.window.showWarningMessage(
+                    'Reset all color overrides to the current theme\'s defaults?',
+                    { modal: true }, 'Reset All'
+                );
+                if (answer !== 'Reset All') break;
+                const themeColors = await this._loadThemeColors();
+                const managedKeys = [
+                    ...EDITOR_COLORS, ...SIDEBAR_COLORS, ...ACTIVITY_BAR_COLORS,
+                    ...STATUS_BAR_COLORS, ...TITLE_BAR_COLORS, ...TAB_COLORS, ...PANEL_COLORS,
+                ].map(e => e.key);
+                const colorOverrides: Record<string, string> = {};
+                for (const key of managedKeys) {
+                    const color = themeColors[key] ?? MANAGED_COLOR_DEFAULTS[key];
+                    if (color) { colorOverrides[key] = color; }
+                }
+                await cfg.update('workbench.colorCustomizations', colorOverrides, G);
+                await cfg.update('editor.tokenColorCustomizations', {}, G);
+                this._sendSettings(colorOverrides, {});
+                break;
+            }
 
             case 'openSettings':
                 vscode.commands.executeCommand('workbench.action.openSettingsJson');
@@ -316,18 +363,20 @@ export class ThemeCustomizerPanel {
                 const nowEnabled = !wasEnabled;
                 await this._context.globalState.update('themeCustomizerEnabled', nowEnabled);
                 if (!nowEnabled) {
+                    const savedCc  = cfg.get<Record<string, string>>('workbench.colorCustomizations', {});
+                    const savedTcc = cfg.get<Record<string, any>>('editor.tokenColorCustomizations', {});
                     await this._context.globalState.update('themeCustomizerSnapshot', {
-                        colorCustomizations:      cfg.get<Record<string, string>>('workbench.colorCustomizations', {}),
-                        tokenColorCustomizations: cfg.get<Record<string, any>>('editor.tokenColorCustomizations', {}),
+                        colorCustomizations: savedCc, tokenColorCustomizations: savedTcc,
                     });
                     await cfg.update('workbench.colorCustomizations', {}, G);
                     await cfg.update('editor.tokenColorCustomizations', {}, G);
+                    this._sendSettings({}, {});
                 } else {
                     const snap = this._context.globalState.get<any>('themeCustomizerSnapshot', {});
                     if (snap.colorCustomizations)      { await cfg.update('workbench.colorCustomizations', snap.colorCustomizations, G); }
                     if (snap.tokenColorCustomizations) { await cfg.update('editor.tokenColorCustomizations', snap.tokenColorCustomizations, G); }
+                    this._sendSettings(snap.colorCustomizations, snap.tokenColorCustomizations);
                 }
-                this._sendSettings();
                 break;
             }
 
@@ -356,7 +405,10 @@ export class ThemeCustomizerPanel {
                         await cfg.update(key, val, G);
                     }
                 }
-                this._sendSettings();
+                this._sendSettings(
+                    typeof payload.colorCustomizations === 'object' ? payload.colorCustomizations as Record<string, string> : undefined,
+                    typeof payload.tokenColorCustomizations === 'object' ? payload.tokenColorCustomizations as Record<string, any> : undefined
+                );
                 vscode.window.showInformationMessage('Theme imported successfully.');
                 break;
             }
@@ -374,6 +426,7 @@ export class ThemeCustomizerPanel {
     <input type="checkbox" class="enable-check" id="smart-bg-check" title="Apply / clear all background settings">
     <input type="color" id="smart-bg-picker" value="#1e1e1e" title="Base editor background">
     <input type="text" class="hex-input" id="smart-bg-hex" value="#1e1e1e" maxlength="7">
+    <button class="color-reset-btn" id="smart-bg-reset" title="Clear all background overrides">↺</button>
   </div>
 </div>
 <div class="smart-control-row">
@@ -385,6 +438,7 @@ export class ThemeCustomizerPanel {
     <input type="checkbox" class="enable-check" id="smart-fg-check" title="Apply / clear all foreground settings">
     <input type="color" id="smart-fg-picker" value="#d4d4d4" title="Base editor foreground">
     <input type="text" class="hex-input" id="smart-fg-hex" value="#d4d4d4" maxlength="7">
+    <button class="color-reset-btn" id="smart-fg-reset" title="Clear all foreground overrides">↺</button>
   </div>
 </div>
 <div class="smart-control-row">
@@ -396,6 +450,7 @@ export class ThemeCustomizerPanel {
     <input type="checkbox" class="enable-check" id="smart-hl-check" title="Apply / clear all highlight settings">
     <input type="color" id="smart-hl-picker" value="#007acc" title="Base accent / highlight color">
     <input type="text" class="hex-input" id="smart-hl-hex" value="#007acc" maxlength="7">
+    <button class="color-reset-btn" id="smart-hl-reset" title="Clear all highlight overrides">↺</button>
   </div>
 </div>`;
 
@@ -456,6 +511,8 @@ input[type="color"]:disabled{opacity:.35;cursor:not-allowed}
 .hex-input{width:72px;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,#555);color:var(--vscode-input-foreground);font-family:var(--vscode-editor-font-family,monospace);font-size:11px;padding:3px 5px;border-radius:2px;outline:none}
 .hex-input:focus{border-color:var(--vscode-focusBorder,#007fd4)}
 .hex-input:disabled{opacity:.35}
+.color-reset-btn{background:transparent;border:none;color:var(--vscode-descriptionForeground);cursor:pointer;font-size:13px;padding:2px 3px;border-radius:2px;opacity:.45;flex-shrink:0;line-height:1}
+.color-reset-btn:hover{opacity:1;background:var(--vscode-toolbar-hoverBackground,rgba(90,93,94,.31))}
 
 /* ── Setting rows ── */
 .setting-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--vscode-panel-border,#3a3a3a)}
@@ -827,9 +884,34 @@ document.getElementById('btn-import').addEventListener('click', () => {
   vscode.postMessage({ command: 'importTheme' });
 });
 document.getElementById('btn-reset').addEventListener('click', () => {
-  if (confirm('Clear all workbench.colorCustomizations and editor.tokenColorCustomizations?')) {
-    vscode.postMessage({ command: 'resetAll' });
+  vscode.postMessage({ command: 'resetAll' });
+});
+
+// ── Individual color row reset buttons (delegated) ──
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.color-reset-btn[data-key]');
+  if (!btn) return;
+  const { attr, key, cmd } = btn.dataset;
+  if (cmd === 'clearTokenColor') {
+    // Extension won't send loadSettings back, so update DOM immediately
+    const picker = document.querySelector('input[type="color"][' + attr + '="' + key + '"]');
+    const cb     = document.querySelector('.enable-check[' + attr + '="' + key + '"]');
+    const hexEl  = document.querySelector('.hex-input[' + attr + '="' + key + '"]');
+    if (picker) { picker.disabled = true; if (cb) cb.checked = false; if (hexEl) hexEl.disabled = true; }
   }
+  // For resetColor, extension calls _sendSettings() and loadSettings syncs the DOM
+  vscode.postMessage({ command: cmd, key });
+});
+
+// ── Smart reset buttons (restore theme colors for the group) ──
+document.getElementById('smart-bg-reset').addEventListener('click', () => {
+  vscode.postMessage({ command: 'resetColors', keys: SMART_BG_TARGETS.map(t => t.key) });
+});
+document.getElementById('smart-fg-reset').addEventListener('click', () => {
+  vscode.postMessage({ command: 'resetColors', keys: SMART_FG_TARGETS.map(t => t.key) });
+});
+document.getElementById('smart-hl-reset').addEventListener('click', () => {
+  vscode.postMessage({ command: 'resetColors', keys: SMART_HL_TARGETS.map(t => t.key) });
 });
 document.getElementById('btn-settings').addEventListener('click', () => {
   vscode.postMessage({ command: 'openSettings' });
@@ -931,6 +1013,28 @@ vscode.postMessage({ command: 'ready' });
 </script>
 </body>
 </html>`;
+    }
+
+    private async _loadThemeColors(): Promise<Record<string, string>> {
+        const themeName = vscode.workspace.getConfiguration('workbench').get<string>('colorTheme', '');
+        for (const ext of vscode.extensions.all) {
+            const themes: any[] = ext.packageJSON?.contributes?.themes ?? [];
+            const entry = themes.find((t: any) => t.label === themeName || t.id === themeName);
+            if (!entry) { continue; }
+            try {
+                const uri = vscode.Uri.joinPath(ext.extensionUri, entry.path);
+                const raw = await vscode.workspace.fs.readFile(uri);
+                let text = new TextDecoder().decode(raw);
+                let json: any;
+                try { json = JSON.parse(text); }
+                catch {
+                    text = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+                    json = JSON.parse(text);
+                }
+                return json.colors ?? {};
+            } catch { continue; }
+        }
+        return {};
     }
 
     public dispose() {
