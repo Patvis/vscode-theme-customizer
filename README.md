@@ -1,104 +1,157 @@
 # Theme Customizer — VS Code Extension
 
-## What this is
+Visually customize your VS Code theme colors, syntax highlighting, and editor settings — no manual JSON editing required. All changes apply instantly and write directly to your `settings.json`.
 
-A VS Code extension that lets users visually customize their editor theme through a webview panel, writing all changes directly to `settings.json` in real time. No manual JSON editing required.
+---
 
-## How to build and run
+## Features
 
-```powershell
-cd C:\repos\theme-customizer
-npm install
-npm run compile   # or: npm run watch (incremental)
+- **Smart color controls** — set one base color and have all related colors (backgrounds, foregrounds, highlights) derived proportionally
+- **Per-token color overrides** — fine-grained control over every major workbench and editor color
+- **Syntax highlighting** — customize comment, string, keyword, number, type, function and variable colors
+- **Font & editor settings** — font family, size, weight, ligatures, line height, cursor style, minimap, word wrap, and more
+- **Enable/disable toggle** — switch all customizations on or off instantly; your settings are saved and restored
+- **Import / Export** — save your full theme config to a `.json` file and apply it to any other machine
+- **Reset buttons** — restore any individual color or setting group back to the theme's default
+
+---
+
+## Getting Started
+
+Open the Command Palette (`Ctrl+Shift+P`) and run:
+
+```
+Theme: Open Theme Customizer
 ```
 
-Then open the folder in VS Code and press **F5** to launch the Extension Development Host.
+Or use the keybinding: `Ctrl+Shift+T` (when the terminal is not focused).
 
-**Entry point command:** `Theme: Open Theme Customizer` (Command Palette)
-**Keybinding:** `Ctrl+Shift+T` (when terminal is not focused)
+---
 
-## File structure
+## Tabs
 
-```
-theme-customizer/
-├── src/
-│   ├── extension.ts           # Activation entry point, registers the command
-│   └── ThemeCustomizerPanel.ts # All webview logic, HTML/CSS/JS, settings bridge
-├── package.json               # Extension manifest — commands, keybindings, engines
-├── tsconfig.json              # Compiles src/ → out/
-└── .vscodeignore
-```
+### Smart
+The fastest way to restyle your editor. Each control derives a full group of colors from a single base color, keeping proportional relationships intact.
 
-Compiled output goes to `out/` (not committed). `package.json` points `main` to `./out/extension`.
-
-## Architecture
-
-The extension uses a single `vscode.WebviewPanel`. All HTML, CSS, and JavaScript for the UI is generated as a template string inside `ThemeCustomizerPanel._buildHtml()` — no separate media files.
-
-**Data flow:**
-- On panel open → extension reads current VS Code config and `postMessage`s it to the webview (`loadSettings`)
-- User changes a value in the webview → webview `postMessage`s back to extension
-- Extension calls `vscode.workspace.getConfiguration().update(...)` with `ConfigurationTarget.Global`
-- Changes take effect in VS Code immediately (no save/apply step needed)
-
-**Message commands (webview → extension):**
-
-| Command | Effect |
+| Control | What it controls |
 |---|---|
-| `ready` | Extension sends current settings to webview |
-| `updateColor` | Merges key into `workbench.colorCustomizations` |
-| `clearColor` | Removes key from `workbench.colorCustomizations` |
-| `updateTokenColor` | Merges key into `editor.tokenColorCustomizations` |
-| `clearTokenColor` | Removes key from `editor.tokenColorCustomizations` |
-| `updateSetting` | Writes any `editor.*` setting directly |
-| `resetAll` | Clears both color customization objects |
-| `openSettings` | Runs `workbench.action.openSettingsJson` |
-| `exportTheme` | Saves current theme config to a `.json` file via save dialog |
-| `importTheme` | Loads a `.json` theme config file and applies it via open dialog |
+| **Smart Background** | Editor, sidebar, activity bar, tabs, title bar, panel, terminal backgrounds |
+| **Smart Foreground** | Editor text, line numbers, cursor, sidebar, status bar, tab, terminal foregrounds |
+| **Smart Highlights** | Accent color, badge, active tab border, selection, find match, word & line highlights |
+
+Check the checkbox to apply the group; uncheck to clear it. The `↺` button resets the entire group to the current theme's defaults.
+
+### Advanced
+Individual control over every major color token, organized into collapsible sections:
+
+- **Editor** — background, foreground, cursor, selection, line highlight, word highlight, bracket match, find match, gutter, line numbers, indent guides
+- **Sidebar** — background, foreground, border, title, section headers
+- **Activity Bar** — background, active/inactive icons, badge
+- **Status Bar** — background, foreground, debugging and no-folder states
+- **Title Bar** — active/inactive background and foreground
+- **Tabs** — tab bar background, active/inactive tab colors, active border
+- **Panel & Terminal** — panel background/border, terminal background/foreground/cursor/selection
+
+Each row has a checkbox to enable the override, a color picker, a hex input, and a `↺` reset button.
+
+### Syntax, Font & Editor
+- **Token Colors** — comments, strings, keywords, numbers, types/classes, functions, variables
+- **Font** — family, size, line height, ligatures, weight
+- **Editor Behavior** — tab size, word wrap, cursor style/blinking, line numbers, whitespace rendering, minimap, smooth scrolling, format on save, bracket pair colorization
+
+Each setting has an enable checkbox and a `↺` reset button to clear the override.
+
+---
+
+## Color Row Controls
+
+Every color row works the same way:
+
+| Control | Behavior |
+|---|---|
+| Checkbox (unchecked) | Token not present in `settings.json`; picker disabled |
+| Checkbox (checked) | Token written to `settings.json`; picker enabled |
+| Color picker | Live preview — updates immediately on change |
+| Hex input | Syncs bidirectionally with the color picker |
+| `↺` button | Resets to the active theme's color, or the built-in default if the theme doesn't define it |
+
+---
 
 ## Import / Export
 
-The toolbar at the top of the panel exposes two buttons — **Import Theme** and **Export Theme** — that let you move your full theme configuration in and out as a single JSON file.
+Use the **Import Theme** and **Export Theme** buttons in the toolbar to move your full configuration in and out as a single JSON file.
 
-### Export
-
-Click **Export Theme** → a save dialog opens → choose a filename (default: `my-theme.json`). The file contains:
+### Export format
 
 ```jsonc
 {
   "version": 1,
   "colorCustomizations": { /* workbench.colorCustomizations */ },
   "tokenColorCustomizations": { /* editor.tokenColorCustomizations */ },
-  "settings": { /* all font & editor settings you have set */ }
+  "settings": { /* font & editor settings you have overridden */ }
 }
 ```
 
-### Import
+### Import behavior
 
-Click **Import Theme** → an open dialog appears → select a `.json` file previously exported by this extension. The extension applies each section in order:
+1. Applies `colorCustomizations` to `workbench.colorCustomizations` (global)
+2. Applies `tokenColorCustomizations` to `editor.tokenColorCustomizations` (global)
+3. Writes each key in `settings` globally
+4. Refreshes the panel to reflect the imported values
 
-1. Writes `colorCustomizations` to `workbench.colorCustomizations` (global)
-2. Writes `tokenColorCustomizations` to `editor.tokenColorCustomizations` (global)
-3. Iterates every key in `settings` and writes it globally via `getConfiguration().update()`
-4. Refreshes the webview panel to reflect the newly applied values
+If the file cannot be read or parsed, an error is shown and no changes are made.
 
-If the file cannot be read or parsed, an error message is shown and no changes are made. Unknown or missing keys in the file are silently ignored — only the sections present in the file are applied.
+---
 
-## What each tab customizes
+## Enable / Disable Toggle
 
-- **Editor** — 14 tokens: background, foreground, cursor, selection, line highlight, brackets, gutter, line numbers, indent guides
-- **Workbench** — 30+ tokens across sidebar, activity bar, status bar, title bar, tabs, panel, terminal
-- **Syntax** — 7 simple `editor.tokenColorCustomizations` keys: comments, strings, keywords, numbers, types, functions, variables
-- **Font & Editor** — font family/size/weight/ligatures/line height, word wrap, cursor style/blinking, line numbers, minimap, whitespace rendering, format on save, bracket pair colorization, smooth scrolling
+The toggle switch in the top-right corner of the panel turns all customizations on or off:
 
-## Color row UX
+- **Off** — saves a snapshot of your current overrides, then clears `workbench.colorCustomizations` and `editor.tokenColorCustomizations`
+- **On** — restores the saved snapshot
 
-Each color token has a **checkbox + color picker + hex text input**:
-- Unchecked → picker disabled, token not present in `settings.json`
-- Checked → picker enabled, token written to `settings.json` immediately on change
-- Hex input syncs with the color picker bidirectionally
+---
 
-## What does not exist yet
+## Reset Buttons
 
-- No packaging/VSIX build step configured beyond `vscode:prepublish`
-- The extension only writes to **global** settings (`ConfigurationTarget.Global`); workspace-level overrides are not supported yet
+| Button | What it resets |
+|---|---|
+| `↺` on a color row | That token only — restored to the theme's color or built-in default |
+| `↺` on a smart control | All colors in that smart group |
+| **Reset Colors** (footer) | All managed workbench color overrides, prompts for confirmation |
+| **Reset Syntax & Font** (footer) | All syntax token colors and font/editor setting overrides, prompts for confirmation |
+
+---
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `Theme: Open Theme Customizer` | Opens the customizer panel |
+| `Theme: Clear Stored State` | Clears the extension's saved toggle state and snapshot from VS Code's internal storage |
+
+---
+
+## Building from Source
+
+```powershell
+npm install
+npm run compile   # one-time build
+npm run watch     # incremental build
+```
+
+Press **F5** in VS Code to launch the Extension Development Host.
+
+## File Structure
+
+```
+theme-customizer/
+├── src/
+│   ├── extension.ts            # Activation entry point, registers commands
+│   └── ThemeCustomizerPanel.ts # Webview logic, HTML/CSS/JS, settings bridge
+├── package.json                # Extension manifest
+├── tsconfig.json               # Compiles src/ → out/
+└── .vscodeignore
+```
+
+All HTML, CSS, and JavaScript for the UI lives in `ThemeCustomizerPanel._buildHtml()` — no separate media files. Changes write directly to global `settings.json` via `vscode.workspace.getConfiguration().update()`.
