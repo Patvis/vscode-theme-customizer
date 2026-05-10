@@ -142,20 +142,24 @@ function colorRow(e: ColorEntry, isToken = false): string {
 function settingRow(e: SettingEntry): string {
     let control = '';
     if (e.type === 'text') {
-        control = `<input type="text" data-setting-key="${e.key}" placeholder="${e.placeholder ?? ''}">`;
+        control = `<input type="text" data-setting-key="${e.key}" placeholder="${e.placeholder ?? ''}" disabled>`;
     } else if (e.type === 'number') {
-        control = `<input type="number" data-setting-key="${e.key}" min="${e.min}" max="${e.max}" step="${e.step ?? 1}">`;
+        control = `<input type="number" data-setting-key="${e.key}" min="${e.min}" max="${e.max}" step="${e.step ?? 1}" disabled>`;
     } else if (e.type === 'select') {
         const opts = (e.options ?? []).map(o => `<option value="${o.value}">${o.label}</option>`).join('');
-        control = `<select data-setting-key="${e.key}">${opts}</select>`;
+        control = `<select data-setting-key="${e.key}" disabled>${opts}</select>`;
     } else if (e.type === 'checkbox') {
-        control = `<label class="toggle"><input type="checkbox" data-setting-key="${e.key}"><span class="toggle-track"></span></label>`;
+        control = `<label class="toggle"><input type="checkbox" data-setting-key="${e.key}" disabled><span class="toggle-track"></span></label>`;
     }
-    return `<div class="setting-row"><span class="setting-label">${e.label}</span><div class="setting-control">${control}</div></div>`;
+    return `<div class="setting-row"><span class="setting-label">${e.label}</span><input type="checkbox" class="enable-check" data-setting-enable="${e.key}"><div class="setting-control">${control}</div></div>`;
 }
 
 function section(title: string, rows: string): string {
     return `<div class="section"><div class="section-title">${title}</div>${rows}</div>`;
+}
+
+function collapsibleSection(title: string, rows: string): string {
+    return `<details class="section" open><summary class="section-title">${title}</summary>${rows}</details>`;
 }
 
 export class ThemeCustomizerPanel {
@@ -163,9 +167,10 @@ export class ThemeCustomizerPanel {
     private static readonly viewType = 'themeCustomizer';
 
     private readonly _panel: vscode.WebviewPanel;
+    private readonly _context: vscode.ExtensionContext;
     private _disposables: vscode.Disposable[] = [];
 
-    public static createOrShow(extensionUri: vscode.Uri) {
+    public static createOrShow(extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
         if (ThemeCustomizerPanel.currentPanel) {
             ThemeCustomizerPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
             return;
@@ -176,11 +181,12 @@ export class ThemeCustomizerPanel {
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
-        ThemeCustomizerPanel.currentPanel = new ThemeCustomizerPanel(panel);
+        ThemeCustomizerPanel.currentPanel = new ThemeCustomizerPanel(panel, context);
     }
 
-    private constructor(panel: vscode.WebviewPanel) {
+    private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
         this._panel = panel;
+        this._context = context;
         this._panel.webview.html = this._buildHtml();
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(msg => this._handleMessage(msg), null, this._disposables);
@@ -188,11 +194,18 @@ export class ThemeCustomizerPanel {
 
     private _sendSettings() {
         const cfg = vscode.workspace.getConfiguration();
+        const settingOverrides: Record<string, any> = {};
+        for (const e of [...FONT_SETTINGS, ...EDITOR_SETTINGS]) {
+            const v = cfg.inspect(e.key)?.globalValue;
+            if (v !== undefined) { settingOverrides[e.key] = v; }
+        }
         this._panel.webview.postMessage({
             command: 'loadSettings',
             settings: {
+                enabled:                  this._context.globalState.get<boolean>('themeCustomizerEnabled', true),
                 colorCustomizations:      cfg.get('workbench.colorCustomizations', {}),
                 tokenColorCustomizations: cfg.get('editor.tokenColorCustomizations', {}),
+                settingOverrides,
                 fontFamily:    cfg.get('editor.fontFamily', ''),
                 fontSize:      cfg.get('editor.fontSize', 14),
                 lineHeight:    cfg.get('editor.lineHeight', 0),
@@ -226,9 +239,20 @@ export class ThemeCustomizerPanel {
                 await cfg.update('workbench.colorCustomizations', { ...cur, [msg.key]: msg.value }, G);
                 break;
             }
+            case 'updateColors': {
+                const cur = cfg.get<Record<string, string>>('workbench.colorCustomizations', {});
+                await cfg.update('workbench.colorCustomizations', { ...cur, ...msg.updates }, G);
+                break;
+            }
             case 'clearColor': {
                 const cur = { ...cfg.get<Record<string, string>>('workbench.colorCustomizations', {}) };
                 delete cur[msg.key];
+                await cfg.update('workbench.colorCustomizations', cur, G);
+                break;
+            }
+            case 'clearColors': {
+                const cur = { ...cfg.get<Record<string, string>>('workbench.colorCustomizations', {}) };
+                for (const key of (msg.keys as string[])) { delete cur[key]; }
                 await cfg.update('workbench.colorCustomizations', cur, G);
                 break;
             }
@@ -245,6 +269,10 @@ export class ThemeCustomizerPanel {
             }
             case 'updateSetting':
                 await cfg.update(msg.key, msg.value, G);
+                break;
+
+            case 'clearSetting':
+                await cfg.update(msg.key, undefined, G);
                 break;
 
             case 'resetAll':
@@ -283,6 +311,26 @@ export class ThemeCustomizerPanel {
                 break;
             }
 
+            case 'toggleEnabled': {
+                const wasEnabled = this._context.globalState.get<boolean>('themeCustomizerEnabled', true);
+                const nowEnabled = !wasEnabled;
+                await this._context.globalState.update('themeCustomizerEnabled', nowEnabled);
+                if (!nowEnabled) {
+                    await this._context.globalState.update('themeCustomizerSnapshot', {
+                        colorCustomizations:      cfg.get<Record<string, string>>('workbench.colorCustomizations', {}),
+                        tokenColorCustomizations: cfg.get<Record<string, any>>('editor.tokenColorCustomizations', {}),
+                    });
+                    await cfg.update('workbench.colorCustomizations', {}, G);
+                    await cfg.update('editor.tokenColorCustomizations', {}, G);
+                } else {
+                    const snap = this._context.globalState.get<any>('themeCustomizerSnapshot', {});
+                    if (snap.colorCustomizations)      { await cfg.update('workbench.colorCustomizations', snap.colorCustomizations, G); }
+                    if (snap.tokenColorCustomizations) { await cfg.update('editor.tokenColorCustomizations', snap.tokenColorCustomizations, G); }
+                }
+                this._sendSettings();
+                break;
+            }
+
             case 'importTheme': {
                 const openUris = await vscode.window.showOpenDialog({
                     filters: { 'Theme Config': ['json'] },
@@ -316,16 +364,51 @@ export class ThemeCustomizerPanel {
     }
 
     private _buildHtml(): string {
-        const editorSection   = section('Editor', EDITOR_COLORS.map(e => colorRow(e)).join(''));
-        const sidebarSection  = section('Sidebar', SIDEBAR_COLORS.map(e => colorRow(e)).join(''));
-        const activitySection = section('Activity Bar', ACTIVITY_BAR_COLORS.map(e => colorRow(e)).join(''));
-        const statusSection   = section('Status Bar', STATUS_BAR_COLORS.map(e => colorRow(e)).join(''));
-        const titleSection    = section('Title Bar', TITLE_BAR_COLORS.map(e => colorRow(e)).join(''));
-        const tabSection      = section('Tabs', TAB_COLORS.map(e => colorRow(e)).join(''));
-        const panelSection    = section('Panel & Terminal', PANEL_COLORS.map(e => colorRow(e)).join(''));
-        const syntaxSection   = section('Token Colors', SYNTAX_TOKENS.map(e => colorRow(e, true)).join(''));
-        const fontSection     = section('Font', FONT_SETTINGS.map(settingRow).join(''));
-        const editorSetSection = section('Editor Behavior', EDITOR_SETTINGS.map(settingRow).join(''));
+        const smartPanel = `
+<div class="smart-control-row">
+  <div class="smart-control-info">
+    <span class="smart-control-title">Smart Background</span>
+    <span class="smart-control-desc">Derives all window backgrounds (editor, sidebar, activity bar, tabs, title bar, panel, terminal) proportionally from a single base color.</span>
+  </div>
+  <div class="color-input-wrap">
+    <input type="checkbox" class="enable-check" id="smart-bg-check" title="Apply / clear all background settings">
+    <input type="color" id="smart-bg-picker" value="#1e1e1e" title="Base editor background">
+    <input type="text" class="hex-input" id="smart-bg-hex" value="#1e1e1e" maxlength="7">
+  </div>
+</div>
+<div class="smart-control-row">
+  <div class="smart-control-info">
+    <span class="smart-control-title">Smart Foreground</span>
+    <span class="smart-control-desc">Derives all window foregrounds (editor, cursor, line numbers, sidebar, activity bar, status bar, title bar, tabs, terminal) proportionally from a single base color.</span>
+  </div>
+  <div class="color-input-wrap">
+    <input type="checkbox" class="enable-check" id="smart-fg-check" title="Apply / clear all foreground settings">
+    <input type="color" id="smart-fg-picker" value="#d4d4d4" title="Base editor foreground">
+    <input type="text" class="hex-input" id="smart-fg-hex" value="#d4d4d4" maxlength="7">
+  </div>
+</div>
+<div class="smart-control-row">
+  <div class="smart-control-info">
+    <span class="smart-control-title">Smart Highlights</span>
+    <span class="smart-control-desc">Derives the accent color, badge, active tab border, selection, find match, word highlight and line highlight from a single base accent color.</span>
+  </div>
+  <div class="color-input-wrap">
+    <input type="checkbox" class="enable-check" id="smart-hl-check" title="Apply / clear all highlight settings">
+    <input type="color" id="smart-hl-picker" value="#007acc" title="Base accent / highlight color">
+    <input type="text" class="hex-input" id="smart-hl-hex" value="#007acc" maxlength="7">
+  </div>
+</div>`;
+
+        const editorSection   = collapsibleSection('Editor', EDITOR_COLORS.map(e => colorRow(e)).join(''));
+        const sidebarSection  = collapsibleSection('Sidebar', SIDEBAR_COLORS.map(e => colorRow(e)).join(''));
+        const activitySection = collapsibleSection('Activity Bar', ACTIVITY_BAR_COLORS.map(e => colorRow(e)).join(''));
+        const statusSection   = collapsibleSection('Status Bar', STATUS_BAR_COLORS.map(e => colorRow(e)).join(''));
+        const titleSection    = collapsibleSection('Title Bar', TITLE_BAR_COLORS.map(e => colorRow(e)).join(''));
+        const tabSection      = collapsibleSection('Tabs', TAB_COLORS.map(e => colorRow(e)).join(''));
+        const panelSection    = collapsibleSection('Panel &amp; Terminal', PANEL_COLORS.map(e => colorRow(e)).join(''));
+        const syntaxSection   = collapsibleSection('Token Colors', SYNTAX_TOKENS.map(e => colorRow(e, true)).join(''));
+        const fontSection     = collapsibleSection('Font', FONT_SETTINGS.map(settingRow).join(''));
+        const editorSetSection = collapsibleSection('Editor Behavior', EDITOR_SETTINGS.map(settingRow).join(''));
 
         return /* html */`<!DOCTYPE html>
 <html lang="en">
@@ -340,7 +423,11 @@ body{margin:0;padding:0;background:var(--vscode-editor-background);color:var(--v
 
 /* ── Header & Tabs ── */
 header{padding:16px 20px 0;border-bottom:1px solid var(--vscode-panel-border,#454545);flex-shrink:0}
-h1{margin:0 0 12px;font-size:16px;font-weight:600;letter-spacing:.02em}
+.header-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.02em}
+.global-toggle-wrap{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.global-toggle-wrap .toggle-track{width:36px;height:18px}
+.global-toggle-label{font-size:12px;color:var(--vscode-descriptionForeground);min-width:18px}
 .tabs{display:flex;gap:2px}
 .tab-btn{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--vscode-foreground);cursor:pointer;font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);opacity:.6;padding:7px 14px;transition:opacity .1s}
 .tab-btn:hover{opacity:.9}
@@ -348,6 +435,7 @@ h1{margin:0 0 12px;font-size:16px;font-weight:600;letter-spacing:.02em}
 
 /* ── Scrollable content ── */
 .content{flex:1;overflow-y:auto;padding:20px}
+.content.disabled{pointer-events:none;opacity:.35}
 .tab-panel{display:none}.tab-panel.active{display:block}
 
 /* ── Section ── */
@@ -378,6 +466,8 @@ input[type="color"]:disabled{opacity:.35;cursor:not-allowed}
 .setting-control input[type="number"],
 .setting-control select{width:100%;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border,#555);color:var(--vscode-input-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size);padding:4px 7px;border-radius:2px;outline:none}
 .setting-control input:focus,.setting-control select:focus{border-color:var(--vscode-focusBorder,#007fd4)}
+.setting-control input:disabled,.setting-control select:disabled{opacity:.35;cursor:not-allowed}
+.toggle input:disabled+.toggle-track{opacity:.35;cursor:not-allowed}
 
 /* Toggle switch */
 .toggle{position:relative;display:inline-flex;align-items:center;cursor:pointer}
@@ -386,6 +476,20 @@ input[type="color"]:disabled{opacity:.35;cursor:not-allowed}
 .toggle-track::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--vscode-descriptionForeground);transition:transform .15s}
 .toggle input:checked + .toggle-track{background:var(--vscode-focusBorder,#007fd4);border-color:var(--vscode-focusBorder,#007fd4)}
 .toggle input:checked + .toggle-track::after{transform:translateX(18px);background:#fff}
+
+/* ── Smart tab ── */
+.smart-control-row{display:flex;align-items:center;justify-content:space-between;padding:14px 0;border-bottom:1px solid var(--vscode-panel-border,#3a3a3a)}
+.smart-control-row:last-child{border-bottom:none}
+.smart-control-info{display:flex;flex-direction:column;gap:4px;flex:1;margin-right:20px}
+.smart-control-title{font-size:13px;font-weight:600}
+.smart-control-desc{font-size:11px;color:var(--vscode-descriptionForeground);line-height:1.4}
+
+/* ── Collapsible sections (Advanced tab) ── */
+details.section>summary.section-title{cursor:pointer;list-style:none;user-select:none;display:flex;align-items:center;gap:5px;margin-bottom:0;padding-bottom:6px}
+details.section>summary.section-title::-webkit-details-marker{display:none}
+details.section>summary.section-title::before{content:'▶';font-size:7px;opacity:.5;transition:transform .15s;flex-shrink:0}
+details[open].section>summary.section-title::before{transform:rotate(90deg)}
+details.section>summary.section-title+*{margin-top:2px}
 
 /* ── Footer ── */
 footer{flex-shrink:0;display:flex;gap:8px;justify-content:flex-end;padding:12px 20px;border-top:1px solid var(--vscode-panel-border,#454545)}
@@ -399,20 +503,25 @@ button.btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackgrou
 <body>
 
 <header>
-  <h1>Theme Customizer</h1>
+  <div class="header-top">
+    <h1>Theme Customizer</h1>
+    <label class="global-toggle-wrap toggle" title="Enable / disable all color customizations">
+      <input type="checkbox" id="global-toggle" checked>
+      <span class="toggle-track"></span>
+      <span class="global-toggle-label" id="global-toggle-label">On</span>
+    </label>
+  </div>
   <div class="tabs">
-    <button class="tab-btn active" data-tab="editor">Editor</button>
-    <button class="tab-btn" data-tab="workbench">Workbench</button>
-    <button class="tab-btn" data-tab="syntax">Syntax</button>
-    <button class="tab-btn" data-tab="font">Font &amp; Editor</button>
+    <button class="tab-btn active" data-tab="smart">Smart</button>
+    <button class="tab-btn" data-tab="advanced">Advanced</button>
+    <button class="tab-btn" data-tab="syntaxfont">Syntax, Font &amp; Editor</button>
   </div>
 </header>
 
 <div class="content">
-  <div class="tab-panel active" id="panel-editor">${editorSection}</div>
-  <div class="tab-panel" id="panel-workbench">${sidebarSection}${activitySection}${statusSection}${titleSection}${tabSection}${panelSection}</div>
-  <div class="tab-panel" id="panel-syntax">${syntaxSection}</div>
-  <div class="tab-panel" id="panel-font">${fontSection}${editorSetSection}</div>
+  <div class="tab-panel active" id="panel-smart">${smartPanel}</div>
+  <div class="tab-panel" id="panel-advanced">${editorSection}${sidebarSection}${activitySection}${statusSection}${titleSection}${tabSection}${panelSection}</div>
+  <div class="tab-panel" id="panel-syntaxfont">${syntaxSection}${fontSection}${editorSetSection}</div>
 </div>
 
 <footer>
@@ -425,6 +534,217 @@ button.btn-secondary:hover{background:var(--vscode-button-secondaryHoverBackgrou
 <script>
 (function() {
 const vscode = acquireVsCodeApi();
+
+// Global on/off toggle
+const globalToggle = document.getElementById('global-toggle');
+const globalToggleLabel = document.getElementById('global-toggle-label');
+const contentEl = document.querySelector('.content');
+globalToggle.addEventListener('change', () => {
+  vscode.postMessage({ command: 'toggleEnabled' });
+});
+
+// ── Smart Background ──
+function hexToHsl(hex) {
+  const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b);
+  let h, s, l = (max+min)/2;
+  if (max === min) { h = s = 0; }
+  else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / d + 2) / 6; break;
+      default: h = ((r - g) / d + 4) / 6;
+    }
+  }
+  return [h * 360, s * 100, l * 100];
+}
+function hue2rgb(p, q, t) {
+  if (t < 0) t += 1; if (t > 1) t -= 1;
+  if (t < 1/6) return p + (q - p) * 6 * t;
+  if (t < 1/2) return q;
+  if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+  return p;
+}
+function hslToHex(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1/3);
+  }
+  return '#' + [r, g, b].map(x => Math.round(x * 255).toString(16).padStart(2, '0')).join('');
+}
+
+// Lightness deltas derived from VS Code Dark+ defaults (editor.background = #1e1e1e, L ≈ 11.76%)
+const SMART_BG_TARGETS = [
+  { key: 'editor.background',                delta: 0     },
+  { key: 'editorGutter.background',           delta: 0     },
+  { key: 'panel.background',                  delta: 0     },
+  { key: 'terminal.background',               delta: 0     },
+  { key: 'tab.activeBackground',              delta: 0     },
+  { key: 'sideBar.background',                delta: 2.95  },
+  { key: 'editorGroupHeader.tabsBackground',  delta: 5.88  },
+  { key: 'tab.inactiveBackground',            delta: 5.88  },
+  { key: 'activityBar.background',            delta: 8.24  },
+  { key: 'titleBar.activeBackground',         delta: 11.76 },
+  { key: 'titleBar.inactiveBackground',       delta: 11.76 },
+];
+
+function applySmartBg(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+  const [h, s, l] = hexToHsl(hex);
+  const updates = {};
+  SMART_BG_TARGETS.forEach(({ key, delta }) => {
+    updates[key] = hslToHex(h, s, Math.min(100, Math.max(0, l + delta)));
+  });
+  // Update DOM first, then send one atomic write to the extension
+  Object.entries(updates).forEach(([key, newHex]) => {
+    const picker = document.querySelector('input[type="color"][data-color-key="' + key + '"]');
+    const cb     = document.querySelector('.enable-check[data-color-key="' + key + '"]');
+    const hexEl  = document.querySelector('.hex-input[data-color-key="' + key + '"]');
+    if (picker) {
+      picker.value = newHex; picker.disabled = false;
+      if (cb)    { cb.checked = true; }
+      if (hexEl) { hexEl.value = newHex; hexEl.disabled = false; }
+    }
+  });
+  vscode.postMessage({ command: 'updateColors', updates });
+}
+
+const smartPicker = document.getElementById('smart-bg-picker');
+const smartHex    = document.getElementById('smart-bg-hex');
+smartPicker.addEventListener('input', () => {
+  smartHex.value = smartPicker.value;
+  applySmartBg(smartPicker.value);
+});
+smartHex.addEventListener('change', () => {
+  const v = smartHex.value.startsWith('#') ? smartHex.value : '#' + smartHex.value;
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+    smartPicker.value = v; smartHex.value = v;
+    applySmartBg(v);
+  } else { smartHex.value = smartPicker.value; }
+});
+
+// Lightness deltas from editor.foreground default #d4d4d4 (L ≈ 83.14%)
+const SMART_FG_TARGETS = [
+  { key: 'editor.foreground',                  delta:   0     },
+  { key: 'editorLineNumber.activeForeground',  delta:  -5.49  },
+  { key: 'sideBar.foreground',                 delta:  -3.14  },
+  { key: 'titleBar.activeForeground',          delta:  -3.14  },
+  { key: 'terminal.foreground',                delta:  -3.14  },
+  { key: 'sideBarTitle.foreground',            delta:  -9.81  },
+  { key: 'editorCursor.foreground',            delta: -14.90  },
+  { key: 'editorLineNumber.foreground',        delta: -30.98  },
+  { key: 'activityBar.foreground',             delta: +16.86  },
+  { key: 'activityBarBadge.foreground',        delta: +16.86  },
+  { key: 'statusBar.foreground',               delta: +16.86  },
+  { key: 'tab.activeForeground',               delta: +16.86  },
+  { key: 'terminalCursor.foreground',          delta: +16.86  },
+];
+
+function applySmartFg(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+  const [h, s, l] = hexToHsl(hex);
+  const updates = {};
+  SMART_FG_TARGETS.forEach(({ key, delta }) => {
+    updates[key] = hslToHex(h, s, Math.min(100, Math.max(0, l + delta)));
+  });
+  Object.entries(updates).forEach(([key, newHex]) => {
+    const picker = document.querySelector('input[type="color"][data-color-key="' + key + '"]');
+    const cb     = document.querySelector('.enable-check[data-color-key="' + key + '"]');
+    const hexEl  = document.querySelector('.hex-input[data-color-key="' + key + '"]');
+    if (picker) {
+      picker.value = newHex; picker.disabled = false;
+      if (cb)    { cb.checked = true; }
+      if (hexEl) { hexEl.value = newHex; hexEl.disabled = false; }
+    }
+  });
+  vscode.postMessage({ command: 'updateColors', updates });
+}
+
+const smartFgPicker = document.getElementById('smart-fg-picker');
+const smartFgHex    = document.getElementById('smart-fg-hex');
+smartFgPicker.addEventListener('input', () => {
+  smartFgHex.value = smartFgPicker.value;
+  applySmartFg(smartFgPicker.value);
+});
+smartFgHex.addEventListener('change', () => {
+  const v = smartFgHex.value.startsWith('#') ? smartFgHex.value : '#' + smartFgHex.value;
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+    smartFgPicker.value = v; smartFgHex.value = v;
+    applySmartFg(v);
+  } else { smartFgHex.value = smartFgPicker.value; }
+});
+
+// Saturation ratio + lightness delta from accent base #007acc (H=207, S=100%, L=40%)
+const SMART_HL_TARGETS = [
+  { key: 'statusBar.background',                sRatio: 1.00, lDelta:   0  },
+  { key: 'activityBarBadge.background',         sRatio: 1.00, lDelta:   0  },
+  { key: 'tab.activeBorderTop',                 sRatio: 1.00, lDelta:   0  },
+  { key: 'editor.selectionBackground',          sRatio: 0.52, lDelta:  -9  },
+  { key: 'editor.findMatchBackground',          sRatio: 0.13, lDelta:  -3  },
+  { key: 'editor.wordHighlightBackground',      sRatio: 0.00, lDelta:  -6  },
+  { key: 'editor.lineHighlightBackground',      sRatio: 0.05, lDelta: -23  },
+];
+
+function applySmartHl(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+  const [h, s, l] = hexToHsl(hex);
+  const updates = {};
+  SMART_HL_TARGETS.forEach(({ key, sRatio, lDelta }) => {
+    updates[key] = hslToHex(h, Math.min(100, Math.max(0, s * sRatio)), Math.min(100, Math.max(0, l + lDelta)));
+  });
+  Object.entries(updates).forEach(([key, newHex]) => {
+    const picker = document.querySelector('input[type="color"][data-color-key="' + key + '"]');
+    const cb     = document.querySelector('.enable-check[data-color-key="' + key + '"]');
+    const hexEl  = document.querySelector('.hex-input[data-color-key="' + key + '"]');
+    if (picker) {
+      picker.value = newHex; picker.disabled = false;
+      if (cb)    { cb.checked = true; }
+      if (hexEl) { hexEl.value = newHex; hexEl.disabled = false; }
+    }
+  });
+  vscode.postMessage({ command: 'updateColors', updates });
+}
+
+const smartHlPicker = document.getElementById('smart-hl-picker');
+const smartHlHex    = document.getElementById('smart-hl-hex');
+smartHlPicker.addEventListener('input', () => {
+  smartHlHex.value = smartHlPicker.value;
+  applySmartHl(smartHlPicker.value);
+});
+smartHlHex.addEventListener('change', () => {
+  const v = smartHlHex.value.startsWith('#') ? smartHlHex.value : '#' + smartHlHex.value;
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+    smartHlPicker.value = v; smartHlHex.value = v;
+    applySmartHl(v);
+  } else { smartHlHex.value = smartHlPicker.value; }
+});
+
+// ── Smart checkboxes (apply / clear all related settings) ──
+function clearSmartGroup(targets) {
+  const keys = targets.map(t => t.key);
+  keys.forEach(key => {
+    const picker = document.querySelector('input[type="color"][data-color-key="' + key + '"]');
+    const cb     = document.querySelector('.enable-check[data-color-key="' + key + '"]');
+    const hexEl  = document.querySelector('.hex-input[data-color-key="' + key + '"]');
+    if (picker) { picker.disabled = true; if (cb) cb.checked = false; if (hexEl) hexEl.disabled = true; }
+  });
+  vscode.postMessage({ command: 'clearColors', keys });
+}
+
+document.getElementById('smart-bg-check').addEventListener('change', function() {
+  if (this.checked) applySmartBg(smartPicker.value); else clearSmartGroup(SMART_BG_TARGETS);
+});
+document.getElementById('smart-fg-check').addEventListener('change', function() {
+  if (this.checked) applySmartFg(smartFgPicker.value); else clearSmartGroup(SMART_FG_TARGETS);
+});
+document.getElementById('smart-hl-check').addEventListener('change', function() {
+  if (this.checked) applySmartHl(smartHlPicker.value); else clearSmartGroup(SMART_HL_TARGETS);
+});
 
 // Tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -479,6 +799,26 @@ document.querySelectorAll('[data-setting-key]').forEach(el => {
   });
 });
 
+// ── Setting enable checkboxes ──
+document.querySelectorAll('.enable-check[data-setting-enable]').forEach(cb => {
+  const key = cb.getAttribute('data-setting-enable');
+  const controls = () => document.querySelectorAll('[data-setting-key="' + key + '"]');
+  cb.addEventListener('change', () => {
+    controls().forEach(el => { el.disabled = !cb.checked; });
+    if (cb.checked) {
+      const el = document.querySelector('[data-setting-key="' + key + '"]');
+      if (el) {
+        const value = el.type === 'checkbox' ? el.checked
+                    : el.type === 'number'   ? (el.value === '' ? undefined : Number(el.value))
+                    : el.value;
+        if (value !== undefined) vscode.postMessage({ command: 'updateSetting', key, value });
+      }
+    } else {
+      vscode.postMessage({ command: 'clearSetting', key });
+    }
+  });
+});
+
 // ── Footer buttons ──
 document.getElementById('btn-export').addEventListener('click', () => {
   vscode.postMessage({ command: 'exportTheme' });
@@ -500,8 +840,31 @@ window.addEventListener('message', ev => {
   const msg = ev.data;
   if (msg.command !== 'loadSettings') return;
   const s = msg.settings;
+  const enabled = s.enabled !== false;
+  globalToggle.checked = enabled;
+  globalToggleLabel.textContent = enabled ? 'On' : 'Off';
+  contentEl.classList.toggle('disabled', !enabled);
   const cc  = s.colorCustomizations || {};
   const tcc = s.tokenColorCustomizations || {};
+
+  // Sync smart pickers to current editor colors (if set)
+  const editorBg = cc['editor.background'];
+  if (editorBg && /^#[0-9a-fA-F]{6}$/.test(editorBg)) {
+    smartPicker.value = editorBg; smartHex.value = editorBg;
+  }
+  const editorFg = cc['editor.foreground'];
+  if (editorFg && /^#[0-9a-fA-F]{6}$/.test(editorFg)) {
+    smartFgPicker.value = editorFg; smartFgHex.value = editorFg;
+  }
+  const accentColor = cc['statusBar.background'];
+  if (accentColor && /^#[0-9a-fA-F]{6}$/.test(accentColor)) {
+    smartHlPicker.value = accentColor; smartHlHex.value = accentColor;
+  }
+
+  // Sync smart checkboxes: checked when every key in the group is active in settings
+  document.getElementById('smart-bg-check').checked = SMART_BG_TARGETS.every(({ key }) => !!cc[key]);
+  document.getElementById('smart-fg-check').checked = SMART_FG_TARGETS.every(({ key }) => !!cc[key]);
+  document.getElementById('smart-hl-check').checked = SMART_HL_TARGETS.every(({ key }) => !!cc[key]);
 
   // color pickers
   document.querySelectorAll('input[type="color"][data-color-key]').forEach(picker => {
@@ -526,6 +889,15 @@ window.addEventListener('message', ev => {
     picker.disabled = !active;
     hex.disabled    = !active;
     if (active) { picker.value = val.slice(0, 7); hex.value = val.slice(0, 7); }
+  });
+
+  // setting enable checkboxes
+  const overrides = s.settingOverrides || {};
+  document.querySelectorAll('.enable-check[data-setting-enable]').forEach(cb => {
+    const key = cb.getAttribute('data-setting-enable');
+    const active = key in overrides;
+    cb.checked = active;
+    document.querySelectorAll('[data-setting-key="' + key + '"]').forEach(el => { el.disabled = !active; });
   });
 
   // font & editor settings

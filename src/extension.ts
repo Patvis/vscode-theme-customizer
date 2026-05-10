@@ -4,7 +4,7 @@ import { ThemeCustomizerPanel } from './ThemeCustomizerPanel';
 export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('themeCustomizer.open', () => {
-            ThemeCustomizerPanel.createOrShow(context.extensionUri);
+            ThemeCustomizerPanel.createOrShow(context.extensionUri, context);
         })
     );
 }
