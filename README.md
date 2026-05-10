@@ -53,6 +53,36 @@ The extension uses a single `vscode.WebviewPanel`. All HTML, CSS, and JavaScript
 | `updateSetting` | Writes any `editor.*` setting directly |
 | `resetAll` | Clears both color customization objects |
 | `openSettings` | Runs `workbench.action.openSettingsJson` |
+| `exportTheme` | Saves current theme config to a `.json` file via save dialog |
+| `importTheme` | Loads a `.json` theme config file and applies it via open dialog |
+
+## Import / Export
+
+The toolbar at the top of the panel exposes two buttons — **Import Theme** and **Export Theme** — that let you move your full theme configuration in and out as a single JSON file.
+
+### Export
+
+Click **Export Theme** → a save dialog opens → choose a filename (default: `my-theme.json`). The file contains:
+
+```jsonc
+{
+  "version": 1,
+  "colorCustomizations": { /* workbench.colorCustomizations */ },
+  "tokenColorCustomizations": { /* editor.tokenColorCustomizations */ },
+  "settings": { /* all font & editor settings you have set */ }
+}
+```
+
+### Import
+
+Click **Import Theme** → an open dialog appears → select a `.json` file previously exported by this extension. The extension applies each section in order:
+
+1. Writes `colorCustomizations` to `workbench.colorCustomizations` (global)
+2. Writes `tokenColorCustomizations` to `editor.tokenColorCustomizations` (global)
+3. Iterates every key in `settings` and writes it globally via `getConfiguration().update()`
+4. Refreshes the webview panel to reflect the newly applied values
+
+If the file cannot be read or parsed, an error message is shown and no changes are made. Unknown or missing keys in the file are silently ignored — only the sections present in the file are applied.
 
 ## What each tab customizes
 
@@ -71,7 +101,4 @@ Each color token has a **checkbox + color picker + hex text input**:
 ## What does not exist yet
 
 - No packaging/VSIX build step configured beyond `vscode:prepublish`
-- No `out/` directory (run `npm run compile` first)
-- No `node_modules/` (run `npm install` first)
-- No project-level `.claude/settings.json`
-- The extension only writes to **global** settings (`ConfigurationTarget.Global`); workspace-level overrides are not supported
+- The extension only writes to **global** settings (`ConfigurationTarget.Global`); workspace-level overrides are not supported yet
